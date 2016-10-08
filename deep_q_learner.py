@@ -3,96 +3,88 @@ import random
 import numpy as np
 import tensorflow as tf
 
-nodes1 = 200
-nodes2 = 200
-nodes3 = 200
-kernel1_1 = 5
-kernel1_2 = 5
-kernel1_4 = 64
-kernel2_1 = 5
-kernel2_2 = 5
-kernel2_4 = 64
-dropout1 = .5
-dropout2 = .5
-dropout3 = .5
-batch_max = 30
-max_episodes = 10000
-max_steps = 500
+''' 
+Compatible environments:
+    'CartPole-v0'
+    'Breakout-v0'  
+    'FrozenLake-v0'    
+'''
+environment_name = 'FrozenLake-v0'
+batch_size = 50
+max_episodes = 5000
 epsilon = 1.0
-epsilon_decay = 0.99991
-epsilon_min = 0.01
-gamma = (max_steps - 1) / float(max_steps)
+epsilon_decay = 0.9999
+epsilon_min = 0.001
+gamma = .95
 learning_rate = 0.001
-learning_tick = 10
-q_copy_tick = 1000
+learning_tick = 1
+q_copy_tick = 2000
 memory_max = 100000
-use_cnn = True
-use_dropout = False
-show_render = True
 
-if __name__ == '__main__':
+empty_batch = None
 
-    ''' 
-    Compatible environments:
-        'CartPole-v0'
-        'Breakout-v0'      
-    '''
-    env = gym.make('Breakout-v0')
-    use_cnn = True
-    #env.monitor.start('training_dir2', force=True)
+def create_network(environment):
+    if environment.spec.id == 'Breakout-v0':        
+        state_dim1 = env.observation_space.shape[0]
+        state_dim2 = env.observation_space.shape[1]
+        state_dim3 = env.observation_space.shape[2]
+        action_dim = env.action_space.n 
 
-    action_dimensions = env.action_space.n
+        input_states = tf.placeholder(tf.float32, [batch_size, state_dim1, state_dim2, state_dim3])
+        input_next_states = tf.placeholder(tf.float32, [batch_size, state_dim1, state_dim2, state_dim3])
+        input_rewards = tf.placeholder(tf.float32, [None, ])
+        input_not_terminal = tf.placeholder(tf.float32, [None, ])
+        input_actions_filter = tf.placeholder(tf.int32, [None], name="actions_filter_oh")
 
-    sess = tf.Session()
+        actions_filter_oh = tf.one_hot(input_actions_filter, action_dim)
+  
+        network_inputs = [input_states, input_next_states, input_rewards, input_not_terminal, input_actions_filter]  
+      
+        kernel1 = tf.Variable(tf.random_uniform([4, 4, state_dim3, 24]))
+        b1 = tf.Variable(tf.random_uniform([24], -0.1, 0.1))
 
-    if use_cnn:
-        state_dimensions_1 = env.observation_space.shape[0]
-        state_dimensions_2 = env.observation_space.shape[1]
-        state_dimensions_3 = env.observation_space.shape[2]
-        kernel1_3 = state_dimensions_3
-        kernel2_3 = kernel1_4
+        kernel2 = tf.Variable(tf.random_uniform([4, 4, 24, 24]))
+        b2 = tf.Variable(tf.random_uniform([24], -0.1, 0.1))
 
-        states = tf.placeholder(tf.float32, [batch_max, state_dimensions_1, state_dimensions_2, state_dimensions_3])
-        states_ = tf.placeholder(tf.float32, [batch_max, state_dimensions_1, state_dimensions_2, state_dimensions_3])
-        
-        kernel1 = tf.Variable(tf.random_uniform([kernel1_1, kernel1_2, kernel1_3, kernel1_4]))
-        b1 = tf.Variable(tf.random_uniform([kernel1_4], -0.1, 0.1))
-
-        kernel2 = tf.Variable(tf.random_uniform([kernel2_1, kernel2_2, kernel2_3, kernel2_4]))
-        b2 = tf.Variable(tf.random_uniform([kernel2_4], -0.1, 0.1))
-
-        conv1 = tf.nn.conv2d(states, kernel1, [1, 1, 1, 1], padding='SAME')
+        conv1 = tf.nn.conv2d(input_states, kernel1, [1, 1, 1, 1], padding='SAME')
         conv1 = tf.nn.relu(tf.nn.bias_add(conv1, b1))
 
         conv2 = tf.nn.conv2d(conv1, kernel2, [1, 1, 1, 1], padding='SAME')
         conv2 = tf.nn.relu(tf.nn.bias_add(conv2, b2))
 
         conv2_shape = conv2.get_shape().as_list()
-        reshape = tf.reshape(conv2, [batch_max, -1])
+        reshape = tf.reshape(conv2, [batch_size, -1])
         dim1 = reshape.get_shape()[1].value
-   
-        w3 = tf.Variable(tf.random_uniform([dim1, nodes3], -0.1, 0.1))
-        b3 = tf.Variable(tf.random_uniform([nodes3], -0.1, 0.1))
 
-        w4 = tf.Variable(tf.random_uniform([nodes3, action_dimensions], -0.1, 0.1))
-        b4 = tf.Variable(tf.random_uniform([action_dimensions], -0.1, 0.1))
-        
-        hidden_3 = tf.nn.relu(tf.matmul(reshape, w3) + b3) 
+        w3 = tf.Variable(tf.random_uniform([dim1, 128], -0.1, 0.1))
+        b3 = tf.Variable(tf.random_uniform([128], -0.1, 0.1))
 
-        if use_dropout:
-            hidden_3 = tf.nn.dropout(hidden_3, dropout3)
-       
+        w4 = tf.Variable(tf.random_uniform([128, action_dim], -0.1, 0.1))
+        b4 = tf.Variable(tf.random_uniform([action_dim], -0.1, 0.1))
+
+        hidden_3 = tf.nn.relu(tf.matmul(reshape, w3) + b3)
+
         kernel1_ = tf.Variable(kernel1.initialized_value())
         b1_ = tf.Variable(b1.initialized_value())
 
         kernel2_ = tf.Variable(kernel2.initialized_value())
         b2_ = tf.Variable(b2.initialized_value())
 
+        conv1_ = tf.nn.conv2d(input_next_states, kernel1_, [1, 1, 1, 1], padding='SAME')
+        conv1_ = tf.nn.relu(tf.nn.bias_add(conv1_, b1_))
+
+        conv2_ = tf.nn.conv2d(conv1_, kernel2_, [1, 1, 1, 1], padding='SAME')
+        conv2_ = tf.nn.relu(tf.nn.bias_add(conv2_, b2_))
+
+        reshape_ = tf.reshape(conv2_, [batch_size, -1])
+
         w3_ = tf.Variable(w3.initialized_value())
         b3_ = tf.Variable(b3.initialized_value())  
 
         w4_ = tf.Variable(w4.initialized_value())
         b4_ = tf.Variable(b4.initialized_value())  
+
+        hidden_3_ = tf.nn.relu(tf.matmul(reshape_, w3_) + b3_) 
 
         update_kernel1_ = kernel1_.assign(kernel1)
         update_b1_ = b1_.assign(b1)
@@ -116,45 +108,46 @@ if __name__ == '__main__':
             update_b3_, 
             update_b4_]  
 
-        conv1_ = tf.nn.conv2d(states_, kernel1_, [1, 1, 1, 1], padding='SAME')
-        conv1_ = tf.nn.relu(tf.nn.bias_add(conv1_, b1_))
-
-        conv2_ = tf.nn.conv2d(conv1_, kernel2_, [1, 1, 1, 1], padding='SAME')
-        conv2_ = tf.nn.relu(tf.nn.bias_add(conv2_, b2_))
-
-        reshape_ = tf.reshape(conv2_, [batch_max, -1])
-
-        hidden_3_ = tf.nn.relu(tf.matmul(reshape_, w3_) + b3_) 
-
         Q = tf.matmul(hidden_3, w4) + b4
         Q_ = tf.stop_gradient(tf.matmul(hidden_3_, w4_) + b4_)
 
-    else:
-        state_dimensions = env.observation_space.shape[0]
+        Q_filtered = tf.reduce_sum(tf.mul(Q, actions_filter_oh), reduction_indices=1)
+        y_Q_ = input_rewards + gamma * tf.mul(tf.reduce_max(Q_, reduction_indices=1), input_not_terminal)
 
-        states = tf.placeholder(tf.float32, [None, state_dimensions])
-        states_ = tf.placeholder(tf.float32, [None, state_dimensions])
+        loss = tf.reduce_mean(tf.square(y_Q_ - Q_filtered))
+        training = tf.train.AdamOptimizer(learning_rate).minimize(loss)
 
-        w1 = tf.Variable(tf.random_uniform([state_dimensions, nodes1], -0.1, 0.1))
-        b1 = tf.Variable(tf.random_uniform([nodes1], -0.1, 0.1))
+        return (Q, training, update_q_, network_inputs)
+    
+    if environment.spec.id == 'CartPole-v0' or environment.spec.id == 'FrozenLake-v0': 
+        if isinstance(environment.observation_space, gym.spaces.box.Box):
+            state_dim = environment.observation_space.shape[0]
+    
+        else:
+            state_dim = environment.observation_space.n
 
-        w2 = tf.Variable(tf.random_uniform([nodes1, nodes2], -0.1, 0.1))
-        b2 = tf.Variable(tf.random_uniform([nodes2], -0.1, 0.1))
+        action_dim = env.action_space.n 
 
-        w3 = tf.Variable(tf.random_uniform([nodes2, nodes3], -0.1, 0.1))
-        b3 = tf.Variable(tf.random_uniform([nodes3], -0.1, 0.1))
+        input_states = tf.placeholder(tf.float32, [None, state_dim])
+        input_next_states = tf.placeholder(tf.float32, [None, state_dim])
+        input_rewards = tf.placeholder(tf.float32, [None, ])
+        input_not_terminal = tf.placeholder(tf.float32, [None, ])
+        input_actions_filter = tf.placeholder(tf.int32, [None], name="actions_filter_oh")
+        actions_filter_oh = tf.one_hot(input_actions_filter, action_dim)
 
-        w4 = tf.Variable(tf.random_uniform([nodes3, action_dimensions], -0.1, 0.1))
-        b4 = tf.Variable(tf.random_uniform([action_dimensions], -0.1, 0.1))
+        network_inputs = [input_states, input_next_states, input_rewards, input_not_terminal, input_actions_filter]  
 
-        hidden_1 = tf.nn.relu(tf.matmul(states, w1) + b1)
-        hidden_2 = tf.nn.relu(tf.matmul(hidden_1, w2) + b2)
-        hidden_3 = tf.nn.relu(tf.matmul(hidden_2, w3) + b3)
+        w1 = tf.Variable(tf.random_uniform([state_dim, 48], -0.1, 0.1))
+        b1 = tf.Variable(tf.random_uniform([48], -0.1, 0.1))
 
-        if use_dropout:
-            hidden_1 = tf.nn.dropout(hidden_1, dropout1)
-            hidden_2 = tf.nn.dropout(hidden_2, dropout2)
-            hidden_3 = tf.nn.dropout(hidden_3, dropout3)
+        w2 = tf.Variable(tf.random_uniform([48, 48], -0.1, 0.1))
+        b2 = tf.Variable(tf.random_uniform([48], -0.1, 0.1))
+
+        w3 = tf.Variable(tf.random_uniform([48, 48], -0.1, 0.1))
+        b3 = tf.Variable(tf.random_uniform([48], -0.1, 0.1))
+
+        w4 = tf.Variable(tf.random_uniform([48, action_dim], -0.1, 0.1))
+        b4 = tf.Variable(tf.random_uniform([action_dim], -0.1, 0.1))
 
         w1_ = tf.Variable(w1.initialized_value())
         b1_ = tf.Variable(b1.initialized_value())
@@ -190,33 +183,119 @@ if __name__ == '__main__':
             update_b3_, 
             update_b4_]
 
-        hidden_1_ = tf.nn.relu(tf.matmul(states_, w1_) + b1_)
+        hidden_1 = tf.nn.relu(tf.matmul(input_states, w1) + b1)
+        hidden_2 = tf.nn.relu(tf.matmul(hidden_1, w2) + b2)
+        hidden_3 = tf.nn.relu(tf.matmul(hidden_2, w3) + b3) 
+
+        hidden_1_ = tf.nn.relu(tf.matmul(input_next_states, w1_) + b1_)
         hidden_2_ = tf.nn.relu(tf.matmul(hidden_1_, w2_) + b2_)
         hidden_3_ = tf.nn.relu(tf.matmul(hidden_2_, w3_) + b3_)
 
         Q = tf.matmul(hidden_3, w4) + b4
         Q_ = tf.stop_gradient(tf.matmul(hidden_3_, w4_) + b4_)
+     
+        Q_filtered = tf.reduce_sum(tf.mul(Q, actions_filter_oh), reduction_indices=1)
 
-    actions_filter = tf.placeholder(tf.int32, [None], name="actions_filter_oh")
-    actions_filter_oh = tf.one_hot(actions_filter, action_dimensions)
+        y_Q_ = input_rewards + gamma * tf.mul(tf.reduce_max(Q_, reduction_indices=1), input_not_terminal)
 
-    rewards = tf.placeholder(tf.float32, [None, ])
-    not_terminal = tf.placeholder(tf.float32, [None])
- 
-    Q_filtered = tf.reduce_sum(tf.mul(Q, actions_filter_oh), reduction_indices=1)
-    y_Q_ = rewards + gamma * tf.reduce_max(Q_, reduction_indices=1) * not_terminal
+        loss = tf.reduce_mean(tf.square(y_Q_ - Q_filtered))
+        training = tf.train.AdamOptimizer(learning_rate).minimize(loss)
 
-    loss = tf.reduce_mean(tf.square(y_Q_ - Q_filtered))
-    training = tf.train.AdamOptimizer(learning_rate).minimize(loss)
+        return (Q, training, update_q_, network_inputs)
+    return None
+
+
+def get_action(environment, Q, state, network_inputs):
+    if environment.spec.id == 'Breakout-v0': 
+        if empty_batch == None:
+            dim1 = environment.observation_space.shape[0]
+            dim2 = environment.observation_space.shape[1]
+            dim3 = environment.observation_space.shape[2]
+            empty_batch = np.zeros((batch_size, dim1, dim2, dim3))
+
+        empty_batch[0] = state
+        q = sess.run(Q, feed_dict={network_inputs[0]: empty_batch})
+        return np.argmax(q[0]) 
+
+    if environment.spec.id == 'CartPole-v0' or environment.spec.id == 'FrozenLake-v0':  
+        if isinstance(environment.observation_space, gym.spaces.box.Box):
+            q = sess.run(Q, feed_dict={network_inputs[0]: np.array([state])})
+
+        else:
+            empty_batch = np.zeros((environment.observation_space.n))
+            empty_batch[state] = 1.0
+            q = sess.run(Q, feed_dict={network_inputs[0]: np.array([empty_batch])})
+
+        return np.argmax(q)
+    return None
+
+def get_batch_feed(environment, batch, network_inputs):
+    batch_states = []
+    batch_actions = []
+    batch_next_states = []
+    batch_rewards = []
+    batch_not_terminal = []
+
+    if environment.spec.id == 'FrozenLake-v0':
+        for idx, batch_item in enumerate(batch):
+            mem_state, mem_action, mem_reward, mem_next_state, mem_terminal = batch_item 
+
+            mem_state_array = np.zeros((environment.observation_space.n))
+            mem_next_state_array = np.zeros((environment.observation_space.n))
+
+            mem_state_array[mem_state] = 1.0
+            mem_next_state_array[mem_next_state] = 1.0
+         
+            batch_states.append(mem_state_array)
+            batch_actions.append(mem_action)
+            batch_next_states.append(mem_next_state_array)
+            batch_rewards.append(mem_reward)
+            batch_not_terminal.append(0 if mem_terminal else 1)
+
+        feed = {
+            network_inputs[0]: batch_states,
+            network_inputs[1]: batch_next_states,
+            network_inputs[2]: batch_rewards,
+            network_inputs[3]: batch_not_terminal,
+            network_inputs[4]: batch_actions
+        }
+
+        return feed 
+
+    else:     
+        for idx, batch_item in enumerate(batch):
+            mem_state, mem_action, mem_reward, mem_next_state, mem_terminal = batch_item  
+         
+            batch_states.append(mem_state)
+            batch_actions.append(mem_action)
+            batch_next_states.append(mem_next_state)
+            batch_rewards.append(mem_reward)
+            batch_not_terminal.append(0 if mem_terminal else 1)
+
+        feed = {
+            network_inputs[0]: batch_states,
+            network_inputs[1]: batch_next_states,
+            network_inputs[2]: batch_rewards,
+            network_inputs[3]: batch_not_terminal,
+            network_inputs[4]: batch_actions
+        }
+
+        return feed 
+    return None
+
+if __name__ == '__main__':
+    tick_count = 0  
+
+    env = gym.make(environment_name)
+    max_steps = env.spec.timestep_limit
+
+    sess = tf.Session()
+    Q, training, update_q_, network_inputs = create_network(env)
+    sess.run(tf.initialize_all_variables())         
 
     D = []
 
-    sess.run(tf.initialize_all_variables())
-
-    tick_count = 0
-
-    if use_cnn:
-        empty_batch = np.zeros((batch_max, state_dimensions_1, state_dimensions_2, state_dimensions_3)) 
+    env.monitor.start('training_results_{}'.format(env.spec.id), force=True)
 
     for episode in xrange(max_episodes):  
         done = False
@@ -224,21 +303,14 @@ if __name__ == '__main__':
         state = env.reset() 
         next_state = state;
         episode_reward_sum = 0
-        
+
         for step in xrange(max_steps):
             tick_count += 1
 
             if epsilon >= np.random.rand():
                 action = env.action_space.sample()
             else:
-                if use_cnn:
-                    empty_batch[0] = state
-                    feed = {states: empty_batch}
-                else:
-                    feed = {states: np.array([state])}
-
-                q = sess.run(Q, feed_dict=feed)
-                action = np.argmax(q)
+                action = get_action(env, Q, state, network_inputs)
 
             epsilon = max(epsilon * epsilon_decay, epsilon_min)
 
@@ -253,46 +325,24 @@ if __name__ == '__main__':
             if len(D) > memory_max:
                 D.pop(0)
 
-            if len(D) >= batch_max:
-                batch = random.sample(D, batch_max)
-                batch_states = []
-                batch_actions = []
-                batch_next_states = []
-                batch_rewards = []
-                batch_not_terminal = []
-            
-                for idx, batch_item in enumerate(batch):
-                    mem_state, mem_action, mem_reward, mem_next_state, mem_terminal = batch_item  
-                 
-                    batch_states.append(mem_state)
-                    batch_actions.append(mem_action)
-                    batch_next_states.append(mem_next_state)
-                    batch_rewards.append(mem_reward)
-                    batch_not_terminal.append(0 if mem_terminal else 1)
-
-                feed = {
-                    states: batch_states,
-                    actions_filter: batch_actions,
-                    rewards: batch_rewards,
-                    states_: batch_next_states,
-                    not_terminal: batch_not_terminal
-                }
+            if len(D) >= batch_size:
+                batch = random.sample(D, batch_size)
+                feed = get_batch_feed(env, batch, network_inputs) 
 
                 if tick_count % learning_tick == 0:
-                    loss_value, _ = sess.run([loss, training], feed_dict=feed)           
+                    sess.run([training], feed_dict=feed)           
                     
                 if tick_count % q_copy_tick == 0:
-                    sess.run(update_q_)   
+                    sess.run(update_q_)  
 
             state = next_state 
 
-            if show_render and episode % 10 == 0:
-                env.render() 
+            #if episode % 10 == 0:
+            #    env.render() 
 
             if done or step + 1 == max_steps:
-                reward_total = np.sum(rewards)
                 print "[Episode - {}, Steps - {}, Rewards - {}]".format(episode, step, episode_reward_sum) 
                 break
 
-    #env.monitor.close()
-    sess.close()      
+    env.monitor.close()
+    sess.close()    
