@@ -1,5 +1,6 @@
 import gym
 import random
+import math
 import numpy as np
 import tensorflow as tf
 
@@ -9,7 +10,7 @@ Compatible environments:
     'Breakout-v0'  
     'FrozenLake-v0'    
 '''
-environment_name = 'FrozenLake-v0'
+environment_name = 'CartPole-v0'
 batch_size = 50
 max_episodes = 5000
 epsilon = 1.0
@@ -18,8 +19,43 @@ epsilon_min = 0.001
 gamma = .95
 learning_rate = 0.001
 learning_tick = 1
+sorting_tick = 5000
 q_copy_tick = 2000
 memory_max = 100000
+
+def get_weights(list_size):
+    w = []
+    w.append(1.0)
+    w.append(1.0)
+    for i in xrange(2, list_size):
+        w.append(w[i-1] + w[i-2])
+   
+    w = np.multiply(w, 1 / np.sum(w))
+    
+    return w
+
+def get_buckets(list_size, weights):
+    total = 0
+    index = 0
+    buckets = []
+    for w in weights:
+        temp = list_size - total
+        if w * temp < 1:
+            buckets.append([index])
+            index += 1
+            total += 1
+        else:
+            n = int(math.floor(temp * w))
+            if n == 1:
+                buckets.append([index + 1])
+            else:
+                buckets.append([index + 1, n + index])
+            index += n
+
+    if index < list_size:
+        buckets[-1][-1] = list_size - 1
+
+    return buckets
 
 empty_batch = None
 
@@ -114,10 +150,11 @@ def create_network(environment):
         Q_filtered = tf.reduce_sum(tf.mul(Q, actions_filter_oh), reduction_indices=1)
         y_Q_ = input_rewards + gamma * tf.mul(tf.reduce_max(Q_, reduction_indices=1), input_not_terminal)
 
-        loss = tf.reduce_mean(tf.square(y_Q_ - Q_filtered))
+        losses = tf.square(y_Q_ - Q_filtered)
+        loss = tf.reduce_mean(losses)
         training = tf.train.AdamOptimizer(learning_rate).minimize(loss)
 
-        return (Q, training, update_q_, network_inputs)
+        return (Q, losses, training, update_q_, network_inputs)
     
     if environment.spec.id == 'CartPole-v0' or environment.spec.id == 'FrozenLake-v0': 
         if isinstance(environment.observation_space, gym.spaces.box.Box):
@@ -137,16 +174,16 @@ def create_network(environment):
 
         network_inputs = [input_states, input_next_states, input_rewards, input_not_terminal, input_actions_filter]  
 
-        w1 = tf.Variable(tf.random_uniform([state_dim, 48], -0.1, 0.1))
-        b1 = tf.Variable(tf.random_uniform([48], -0.1, 0.1))
+        w1 = tf.Variable(tf.random_uniform([state_dim, 150], -0.1, 0.1))
+        b1 = tf.Variable(tf.random_uniform([150], -0.1, 0.1))
 
-        w2 = tf.Variable(tf.random_uniform([48, 48], -0.1, 0.1))
-        b2 = tf.Variable(tf.random_uniform([48], -0.1, 0.1))
+        w2 = tf.Variable(tf.random_uniform([150, 150], -0.1, 0.1))
+        b2 = tf.Variable(tf.random_uniform([150], -0.1, 0.1))
 
-        w3 = tf.Variable(tf.random_uniform([48, 48], -0.1, 0.1))
-        b3 = tf.Variable(tf.random_uniform([48], -0.1, 0.1))
+        w3 = tf.Variable(tf.random_uniform([150, 150], -0.1, 0.1))
+        b3 = tf.Variable(tf.random_uniform([150], -0.1, 0.1))
 
-        w4 = tf.Variable(tf.random_uniform([48, action_dim], -0.1, 0.1))
+        w4 = tf.Variable(tf.random_uniform([150, action_dim], -0.1, 0.1))
         b4 = tf.Variable(tf.random_uniform([action_dim], -0.1, 0.1))
 
         w1_ = tf.Variable(w1.initialized_value())
@@ -198,10 +235,11 @@ def create_network(environment):
 
         y_Q_ = input_rewards + gamma * tf.mul(tf.reduce_max(Q_, reduction_indices=1), input_not_terminal)
 
-        loss = tf.reduce_mean(tf.square(y_Q_ - Q_filtered))
+        losses = tf.square(y_Q_ - Q_filtered)
+        loss = tf.reduce_mean(losses)
         training = tf.train.AdamOptimizer(learning_rate).minimize(loss)
 
-        return (Q, training, update_q_, network_inputs)
+        return (Q, losses, training, update_q_, network_inputs)
     return None
 
 
@@ -238,7 +276,7 @@ def get_batch_feed(environment, batch, network_inputs):
 
     if environment.spec.id == 'FrozenLake-v0':
         for idx, batch_item in enumerate(batch):
-            mem_state, mem_action, mem_reward, mem_next_state, mem_terminal = batch_item 
+            mem_state, mem_action, mem_reward, mem_next_state, mem_terminal, mem_loss = batch_item 
 
             mem_state_array = np.zeros((environment.observation_space.n))
             mem_next_state_array = np.zeros((environment.observation_space.n))
@@ -264,7 +302,7 @@ def get_batch_feed(environment, batch, network_inputs):
 
     else:     
         for idx, batch_item in enumerate(batch):
-            mem_state, mem_action, mem_reward, mem_next_state, mem_terminal = batch_item  
+            mem_state, mem_action, mem_reward, mem_next_state, mem_terminal, mem_loss = batch_item  
          
             batch_states.append(mem_state)
             batch_actions.append(mem_action)
@@ -290,18 +328,22 @@ if __name__ == '__main__':
     max_steps = env.spec.timestep_limit
 
     sess = tf.Session()
-    Q, training, update_q_, network_inputs = create_network(env)
+    Q, losses, training, update_q_, network_inputs = create_network(env)
     sess.run(tf.initialize_all_variables())         
 
     D = []
 
     env.monitor.start('training_results_{}'.format(env.spec.id), force=True)
 
+    weights = get_weights(batch_size)
+
     for episode in xrange(max_episodes):  
         done = False
         reward = 0.0;
         state = env.reset() 
-        next_state = state;
+        next_state = state
+        default_loss = 100
+        memory_losses = []
         episode_reward_sum = 0
 
         for step in xrange(max_steps):
@@ -318,24 +360,43 @@ if __name__ == '__main__':
 
             terminal = True if done and step + 1 < max_steps else False
             
-            episode_reward_sum += reward               
-
-            D.append([state, action, reward, next_state, terminal]) 
+            episode_reward_sum += reward   
+  
+            D.insert(0, [state, action, reward, next_state, terminal, default_loss]) 
+            #D.append([state, action, reward, next_state, terminal, default_loss]) 
 
             if len(D) > memory_max:
-                D.pop(0)
+                D.pop()
+                #D.pop(0)
 
             if len(D) >= batch_size:
-                batch = random.sample(D, batch_size)
-                feed = get_batch_feed(env, batch, network_inputs) 
+                buckets = get_buckets(len(D), weights)
+                batch_indices = []
+                batch = []
+                
+                for bucket in buckets:
+                    batch_indices.append(random.randint(bucket[0], bucket[-1]))
+
+                for index in batch_indices:
+                    batch.append(D[index])                 
+
+                #batch = random.sample(D, batch_size)
+                feed = get_batch_feed(env, batch, network_inputs)
 
                 if tick_count % learning_tick == 0:
-                    sess.run([training], feed_dict=feed)           
+                    loss_values, _ = sess.run([losses, training], feed_dict=feed)   
+
+                    for i in xrange(len(loss_values)):
+                        index = batch_indices[i]
+                        D[index][5] = loss_values[i]                                
                     
                 if tick_count % q_copy_tick == 0:
                     sess.run(update_q_)  
 
-            state = next_state 
+                if tick_count % sorting_tick == 0:
+                    D = sorted(D, reverse=True, key=lambda d_entry: d_entry[5])
+
+            state = next_state   
 
             #if episode % 10 == 0:
             #    env.render() 
